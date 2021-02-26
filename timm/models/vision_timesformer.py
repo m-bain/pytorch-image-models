@@ -303,6 +303,7 @@ class TimesBlock(nn.Module):
 
     def forward(self, x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
                 time_n, space_f):
+
         x = self.norm3(x)
         x = self.timeattn(x, einops_from_time, einops_to_time, n=time_n)
         x = x + self.drop_path(x)
@@ -615,13 +616,9 @@ class Timesformer(nn.Module):
             self.patch_embed = VideoPatchEmbed(
                 img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
-        self.patches_per_frame = num_patches // num_frames
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, self.patches_per_frame + 1, embed_dim))  # remember to take pos_embed[1:] for tiling over time
-        self.temporal_embed = nn.Parameter(torch.zeros(1, num_frames, embed_dim))
-
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
@@ -674,19 +671,7 @@ class Timesformer(nn.Module):
         BF = x.shape[0]
         cls_tokens = self.cls_token.expand(BF, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
-
-        # positional embed needs to be tiled for each frame (this does [1,2,3] --> [1,2,3,1,2,3]...)
-        cls_embed = self.pos_embed[:, 0, :].unsqueeze(1)
-
-        tile_pos_embed = self.pos_embed[:, 1:, :].repeat(1, self.num_frames, 1)
-        # temporal embed needs to be repeated within each frame (this does [1,2,3] --> [1,1,1,2,2,2,3,3,3]...)
-        tile_temporal_embed = self.temporal_embed.repeat_interleave(
-            self.patch_embed.num_patches // self.num_frames, 1)
-
-        total_pos_embed = tile_pos_embed + tile_temporal_embed
-        total_pos_embed = torch.cat([cls_embed, total_pos_embed], dim=1)
-        x = x + total_pos_embed
-
+        x = x + self.pos_embed
         x = self.pos_drop(x)
 
         einops_from_space = 'b (f n) d'
@@ -1094,18 +1079,18 @@ def timesformer_base_patch16_224(pretrained=False, **kwargs):
 if __name__ == "__main__":
     timesf = True
     from torch import nn
-
-    vit_model = vit_base_patch16_224(pretrained=True)
-
     if timesf:
         vit_model = vit_base_patch16_224(pretrained=True)
         vit_checkpoint = vit_model.state_dict()
+
         model = timesformer_base_patch16_224()
         model.head = nn.Identity()
+        del vit_checkpoint['pos_embed']
         model.load_state_dict(vit_checkpoint, strict=False)
+
+
         imgs = torch.rand([3, 8, 3, 224, 224])
         output = model(imgs)
-        print(output.shape)
     else:
         imgs = torch.rand([1, 3, 224, 224])
-        output = vit_model(imgs)
+        output = model(imgs)
