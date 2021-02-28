@@ -205,13 +205,15 @@ class VarAttention(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.proj = nn.Linear(dim, dim)
         if initialize == 'zeros':
             self.qkv.weight.data.fill_(0)
             self.qkv.bias.data.fill_(0)
+            self.proj.weight.data.fill_(0)
+            self.proj.weight.data.fill_(1)
         self.attn_drop = nn.Dropout(attn_drop)
 
         ### to out
-        self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, einops_from, einops_to, **einops_dims):
@@ -288,7 +290,7 @@ class Block(nn.Module):
 class TimesBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, time_init='rand'):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, time_init='zeros'):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = VarAttention(
@@ -307,16 +309,11 @@ class TimesBlock(nn.Module):
 
     def forward(self, x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
                 time_n, space_f):
-        x = self.norm3(x)
+        #x = self.norm3(x)
         x = x + self.timeattn(x, einops_from_time, einops_to_time, n=time_n)
-        x = x + self.drop_path(x)
-        x = self.norm1(x)
-        x = self.attn(x, einops_from_space, einops_to_space, f=space_f)
-        x = x + self.drop_path(x)
-        x = self.norm2(x)
-        x = self.mlp(x)
-        x = x + self.drop_path(x)
-
+        #x = x + self.drop_path(x)
+        x = x + self.drop_path(self.attn(self.norm1(x), einops_from_space, einops_to_space, f=space_f))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
 
@@ -513,7 +510,6 @@ class VisionTransformer(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
         x = x + self.pos_embed
         x = self.pos_drop(x)
-
         for blk in self.blocks:
             x = blk(x)
 
@@ -651,7 +647,7 @@ class Timesformer(nn.Module):
 
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
-        self.apply(self._init_weights)
+        #self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -673,15 +669,13 @@ class Timesformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x):
+    def forward_features(self, x, debug=False):
         x = self.patch_embed(x)
         BF = x.shape[0]
         cls_tokens = self.cls_token.expand(BF, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
-
         # positional embed needs to be tiled for each frame (this does [1,2,3] --> [1,2,3,1,2,3]...)
         cls_embed = self.pos_embed[:, 0, :].unsqueeze(1)
-
         tile_pos_embed = self.pos_embed[:, 1:, :].repeat(1, self.num_frames, 1)
         # temporal embed needs to be repeated within each frame (this does [1,2,3] --> [1,1,1,2,2,2,3,3,3]...)
         tile_temporal_embed = self.temporal_embed.repeat_interleave(
@@ -690,30 +684,33 @@ class Timesformer(nn.Module):
         total_pos_embed = tile_pos_embed + tile_temporal_embed
         total_pos_embed = torch.cat([cls_embed, total_pos_embed], dim=1)
         x = x + total_pos_embed
-
         x = self.pos_drop(x)
 
         einops_from_space = 'b (f n) d'
         einops_to_space = '(b f) n d'
         einops_from_time = 'b (f n) d'
         einops_to_time = '(b n) f d'
-
         n = self.patch_embed.num_patches
         f = self.num_frames
-
         for blk in self.blocks:
             x = blk(x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
                     time_n=n, space_f=f)
-
+        pre_cls = x
         x = self.norm(x)[:, 0]
         x = self.pre_logits(x)
+        if debug:
+            return x, pre_cls
         return x
 
-    def forward(self, x):
-        x = self.forward_features(x)
-        x = self.head(x)
-        return x
-
+    def forward(self, x, debug=False):
+        x = self.forward_features(x, debug=debug)
+        if not debug:
+            x = self.head(x)
+            return x
+        else:
+            x, pre_cls = x
+            x = self.head(x)
+            return x, pre_cls
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from
@@ -1096,20 +1093,28 @@ def timesformer_base_patch16_224(pretrained=False, **kwargs):
 
 
 if __name__ == "__main__":
-    timesf = True
     from torch import nn
-
     vit_model = vit_base_patch16_224(pretrained=True)
+    vit_checkpoint = vit_model.state_dict()
 
-    if timesf:
-        vit_model = vit_base_patch16_224(pretrained=True)
-        vit_checkpoint = vit_model.state_dict()
-        model = timesformer_base_patch16_224(pretrained=False, time_init='zeros')
-        model.head = nn.Identity()
-        model.load_state_dict(vit_checkpoint, strict=False)
-        imgs = torch.rand([3, 8, 3, 224, 224])
-        output = model(imgs)
+    # remove cls agg
+    model = timesformer_base_patch16_224(num_frames=1)
+    model.head = nn.Identity()
+    model.pre_logits = nn.Identity()
+
+    model.load_state_dict(vit_checkpoint, strict=False)
+    vit_model = vit_model
+    imgs = torch.rand([1, 1, 3, 224, 224])
+    print('TIMESFORMER OUTPUT:')
+    output, pre_cls = model(imgs, debug=True)
+    print(output.shape)
+    vit_model.head = nn.Identity()
+
+    block_input = torch.ones([1, 197, 768])
+    print('VIT OUTPUT:')
+
+    for idx in range(imgs.shape[1]):
+        sub_img = imgs[:, idx]
+        vit_output = vit_model(sub_img)
         print(output.shape)
-    else:
-        imgs = torch.rand([1, 3, 224, 224])
-        output = vit_model(imgs)
+        break
