@@ -510,7 +510,7 @@ class VisionTransformer(nn.Module):
         B = x.shape[0]
         x = self.patch_embed(x)
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
-        x = torch.cat((cls_tokens, x), dim=2)
+        x = torch.cat((cls_tokens, x), dim=1)
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
@@ -773,7 +773,6 @@ def _create_vision_transformer(variant, pretrained=False, distilled=False, times
         model_cls = Timesformer
     else:
         model_cls = VisionTransformer
-    print(model_cls)
     model = model_cls(img_size=img_size, num_classes=num_classes, representation_size=repr_size, **kwargs)
     model.default_cfg = default_cfg
 
