@@ -180,8 +180,6 @@ class Attention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        import pdb;
-        pdb.set_trace()
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
@@ -198,7 +196,8 @@ class Attention(nn.Module):
 
 
 class VarAttention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
+                 initialize='random'):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -206,6 +205,9 @@ class VarAttention(nn.Module):
         self.scale = qk_scale or head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        if initialize == 'zeros':
+            self.qkv.weight.data.fill_(0)
+            self.qkv.bias.data.fill_(0)
         self.attn_drop = nn.Dropout(attn_drop)
 
         ### to out
@@ -286,13 +288,15 @@ class Block(nn.Module):
 class TimesBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, time_init='rand'):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = VarAttention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+
         self.timeattn = VarAttention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop,
+            initialize=time_init)
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -304,7 +308,7 @@ class TimesBlock(nn.Module):
     def forward(self, x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
                 time_n, space_f):
         x = self.norm3(x)
-        x = self.timeattn(x, einops_from_time, einops_to_time, n=time_n)
+        x = x + self.timeattn(x, einops_from_time, einops_to_time, n=time_n)
         x = x + self.drop_path(x)
         x = self.norm1(x)
         x = self.attn(x, einops_from_space, einops_to_space, f=space_f)
@@ -581,7 +585,7 @@ class Timesformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
-                 num_frames=8):
+                 num_frames=8, time_init='rand'):
         """
         Args:
             img_size (int, tuple): input image size
@@ -613,7 +617,7 @@ class Timesformer(nn.Module):
                 hybrid_backbone, img_size=img_size, in_chans=in_chans, embed_dim=embed_dim)
         else:
             self.patch_embed = VideoPatchEmbed(
-                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, num_frames=num_frames)
         num_patches = self.patch_embed.num_patches
         self.patches_per_frame = num_patches // num_frames
 
@@ -628,7 +632,7 @@ class Timesformer(nn.Module):
         self.blocks = nn.ModuleList([
             TimesBlock(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, time_init=time_init)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
 
@@ -769,6 +773,7 @@ def _create_vision_transformer(variant, pretrained=False, distilled=False, times
         model_cls = Timesformer
     else:
         model_cls = VisionTransformer
+    print(model_cls)
     model = model_cls(img_size=img_size, num_classes=num_classes, representation_size=repr_size, **kwargs)
     model.default_cfg = default_cfg
 
@@ -1100,7 +1105,7 @@ if __name__ == "__main__":
     if timesf:
         vit_model = vit_base_patch16_224(pretrained=True)
         vit_checkpoint = vit_model.state_dict()
-        model = timesformer_base_patch16_224()
+        model = timesformer_base_patch16_224(pretrained=False, time_init='zeros')
         model.head = nn.Identity()
         model.load_state_dict(vit_checkpoint, strict=False)
         imgs = torch.rand([3, 8, 3, 224, 224])
