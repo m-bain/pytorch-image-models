@@ -173,23 +173,19 @@ class Attention(nn.Module):
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-
-        ### to out
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-
-        ## to out
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -203,16 +199,14 @@ class VarAttention(nn.Module):
         head_dim = dim // num_heads
         # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
         self.scale = qk_scale or head_dim ** -0.5
-
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
         if initialize == 'zeros':
             self.qkv.weight.data.fill_(0)
             self.qkv.bias.data.fill_(0)
             self.proj.weight.data.fill_(0)
-            self.proj.weight.data.fill_(1)
+            self.proj.bias.data.fill_(0)
         self.attn_drop = nn.Dropout(attn_drop)
-
         ### to out
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -309,10 +303,19 @@ class TimesBlock(nn.Module):
 
     def forward(self, x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
                 time_n, space_f):
-        #x = self.norm3(x)
-        x = x + self.timeattn(x, einops_from_time, einops_to_time, n=time_n)
-        #x = x + self.drop_path(x)
-        x = x + self.drop_path(self.attn(self.norm1(x), einops_from_space, einops_to_space, f=space_f))
+
+        # first we do timeattn via a residual connection
+        # x' = x + timeattn(x)
+        # then we take the norm
+        # x'' = norm1(x')
+        # then we do spatial attention
+        # x''' = space_attn(x'')
+        # then norm, mlp, residual with dropout
+        # x'''' = x''' + drop(mlp(norm2(x''')))
+        x = x + self.drop_path(self.attn(
+            self.norm1(x + self.timeattn(x, einops_from_time, einops_to_time, n=time_n)),
+            einops_to_space, einops_to_space, f=space_f)
+        )
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -512,7 +515,6 @@ class VisionTransformer(nn.Module):
         x = self.pos_drop(x)
         for blk in self.blocks:
             x = blk(x)
-
         x = self.norm(x)[:, 0]
         x = self.pre_logits(x)
         return x
@@ -647,7 +649,17 @@ class Timesformer(nn.Module):
 
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
+
+        # TODO: comment this out so we don't overwrite the 0-initialisation. If training from scratch...
+        # i.e. without ViT, then we might want this back
         #self.apply(self._init_weights)
+
+        ## einops transformations
+        self.einops_from_space = 'b (f n) d'
+        self.einops_to_space = '(b f) n d'
+        self.einops_from_time = 'b (f n) d'
+        self.einops_to_time = '(b n) f d'
+
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -669,7 +681,7 @@ class Timesformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, debug=False):
+    def forward_features(self, x):
         x = self.patch_embed(x)
         BF = x.shape[0]
         cls_tokens = self.cls_token.expand(BF, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
@@ -686,24 +698,18 @@ class Timesformer(nn.Module):
         x = x + total_pos_embed
         x = self.pos_drop(x)
 
-        einops_from_space = 'b (f n) d'
-        einops_to_space = '(b f) n d'
-        einops_from_time = 'b (f n) d'
-        einops_to_time = '(b n) f d'
         n = self.patch_embed.num_patches
         f = self.num_frames
         for blk in self.blocks:
-            x = blk(x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
+            x = blk(x, self.einops_from_space, self.einops_to_space, self.einops_from_time, self.einops_to_time,
                     time_n=n, space_f=f)
         pre_cls = x
         x = self.norm(x)[:, 0]
         x = self.pre_logits(x)
-        if debug:
-            return x, pre_cls
         return x
 
-    def forward(self, x, debug=False):
-        x = self.forward_features(x, debug=debug)
+    def forward(self, x):
+        x = self.forward_features(x)
         if not debug:
             x = self.head(x)
             return x
@@ -1106,7 +1112,7 @@ if __name__ == "__main__":
     vit_model = vit_model
     imgs = torch.rand([1, 1, 3, 224, 224])
     print('TIMESFORMER OUTPUT:')
-    output, pre_cls = model(imgs, debug=True)
+    output, pre_cls = model(imgs)
     print(output.shape)
     vit_model.head = nn.Identity()
 
@@ -1118,3 +1124,5 @@ if __name__ == "__main__":
         vit_output = vit_model(sub_img)
         print(output.shape)
         break
+
+    import pdb; pdb.set_trace()
