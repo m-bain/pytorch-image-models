@@ -365,7 +365,8 @@ class VideoPatchEmbed(nn.Module):
         B, F, C, H, W = x.shape
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        assert F == self.num_frames
+        assert F <= self.num_frames
+        # why cant it be changed?
         new_input = x.view(-1, C, H, W)
         new_output = self.proj(new_input)
         new_output = new_output.flatten(2).transpose(2, 1)
@@ -682,6 +683,7 @@ class Timesformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x):
+        curr_frames = x.shape[1]
         x = self.patch_embed(x)
         BF = x.shape[0]
         cls_tokens = self.cls_token.expand(BF, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
@@ -695,11 +697,13 @@ class Timesformer(nn.Module):
 
         total_pos_embed = tile_pos_embed + tile_temporal_embed
         total_pos_embed = torch.cat([cls_embed, total_pos_embed], dim=1)
-        x = x + total_pos_embed
+
+        curr_patches = x.shape[1]
+        x = x + total_pos_embed[:, :curr_patches]
         x = self.pos_drop(x)
 
-        n = self.patch_embed.num_patches
-        f = self.num_frames
+        n = curr_patches - 1
+        f = curr_frames
         for blk in self.blocks:
             x = blk(x, self.einops_from_space, self.einops_to_space, self.einops_from_time, self.einops_to_time,
                     time_n=n, space_f=f)
@@ -710,13 +714,8 @@ class Timesformer(nn.Module):
 
     def forward(self, x):
         x = self.forward_features(x)
-        if not debug:
-            x = self.head(x)
-            return x
-        else:
-            x, pre_cls = x
-            x = self.head(x)
-            return x, pre_cls
+        x = self.head(x)
+        return x
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from
@@ -1104,15 +1103,15 @@ if __name__ == "__main__":
     vit_checkpoint = vit_model.state_dict()
 
     # remove cls agg
-    model = timesformer_base_patch16_224(num_frames=1)
+    model = timesformer_base_patch16_224(num_frames=3)
     model.head = nn.Identity()
     model.pre_logits = nn.Identity()
 
     model.load_state_dict(vit_checkpoint, strict=False)
     vit_model = vit_model
-    imgs = torch.rand([1, 1, 3, 224, 224])
+    imgs = torch.rand([1, 2, 3, 224, 224])
     print('TIMESFORMER OUTPUT:')
-    output, pre_cls = model(imgs)
+    output = model(imgs)
     print(output.shape)
     vit_model.head = nn.Identity()
 
