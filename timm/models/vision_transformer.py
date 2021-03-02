@@ -1124,5 +1124,3 @@ if __name__ == "__main__":
         vit_output = vit_model(sub_img)
         print(output.shape)
         break
-
-    import pdb; pdb.set_trace()
