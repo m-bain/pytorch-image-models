@@ -302,7 +302,7 @@ class TimesBlock(nn.Module):
         self.norm3 = norm_layer(dim)
 
     def forward(self, x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
-                time_n, space_f):
+                time_n, space_f, use_time_attn=True):
 
         # first we do timeattn via a residual connection
         # x' = x + timeattn(x)
@@ -312,10 +312,15 @@ class TimesBlock(nn.Module):
         # x''' = space_attn(x'')
         # then norm, mlp, residual with dropout
         # x'''' = x''' + drop(mlp(norm2(x''')))
-        x = x + self.drop_path(self.attn(
+        if use_time_attn:
+            x = x + self.drop_path(self.attn(
             self.norm1(x + self.timeattn(x, einops_from_time, einops_to_time, n=time_n)),
-            einops_to_space, einops_to_space, f=space_f)
-        )
+            einops_from_space, einops_to_space, f=space_f)
+            )
+        else:
+            x = x + self.drop_path(self.attn(
+                self.nor1(x), einops_from_space, einops_to_space, f=space_f)
+            )
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
