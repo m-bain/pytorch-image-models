@@ -137,10 +137,12 @@ default_cfgs = {
 }
 
 
-def attn(q, k, v):
+def attn(q, k, v, return_attn=False):
     sim = einsum('b i d, b j d -> b i j', q, k)
     attn = sim.softmax(dim=-1)
     out = einsum('b i j, b j d -> b i d', attn, v)
+    if return_attn:
+        return out, attn
     return out
 
 
@@ -210,7 +212,7 @@ class VarAttention(nn.Module):
         ### to out
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, einops_from, einops_to, **einops_dims):
+    def forward(self, x, einops_from, einops_to, return_attn, **einops_dims):
         # B, N, C = x.shape
         # pdb.set_trace()
         # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -231,8 +233,9 @@ class VarAttention(nn.Module):
         (cls_q, q_), (cls_k, k_), (cls_v, v_) = map(lambda t: (t[:, 0:1], t[:, 1:]), (q, k, v))
 
         # let classification token attend to key / values of all patches across time and space
-        cls_out = attn(cls_q, k, v)
-
+        cls_out = attn(cls_q, k, v, return_attn=return_attn)
+        if return_attn:
+            cls_out, cls_attn_scores = cls_out # two things were returned
         # rearrange across time or space
         q_, k_, v_ = map(lambda t: rearrange(t, f'{einops_from} -> {einops_to}', **einops_dims), (q_, k_, v_))
 
@@ -244,8 +247,13 @@ class VarAttention(nn.Module):
         v_ = torch.cat((cls_v, v_), dim=1)
 
         # attention
-        out = attn(q_, k_, v_)
+        out = attn(q_, k_, v_, return_attn=return_attn)
 
+        ret_attn = None
+        if return_attn:
+            out, out_attn_scores = out # two things were returned
+            import pdb; pdb.set_trace()
+            out_attn_scores = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
         # merge back time or space
         out = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
 
@@ -254,11 +262,11 @@ class VarAttention(nn.Module):
 
         # merge back the heads
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
-
         ## to out
         x = self.proj(out)
         x = self.proj_drop(x)
-        return x
+        import pdb; pdb.set_trace()
+        return x, ret_attn
 
 
 class Block(nn.Module):
@@ -302,7 +310,7 @@ class TimesBlock(nn.Module):
         self.norm3 = norm_layer(dim)
 
     def forward(self, x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
-                time_n, space_f, use_time_attn=True):
+                time_n, space_f, use_time_attn=True, return_attn=False):
 
         # first we do timeattn via a residual connection
         # x' = x + timeattn(x)
@@ -313,14 +321,34 @@ class TimesBlock(nn.Module):
         # then norm, mlp, residual with dropout
         # x'''' = x''' + drop(mlp(norm2(x''')))
         if use_time_attn:
-            x = x + self.drop_path(self.attn(
-            self.norm1(x + self.timeattn(x, einops_from_time, einops_to_time, n=time_n)),
-            einops_from_space, einops_to_space, f=space_f)
-            )
+            # time_attn_output = x + self.timeattn(x, einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)
+            # time_attn_output_norm = self.norm1(time_attn_output)
+            # space_attn_output = self.drop_path(
+            #     self.attn(time_attn_output_norm, einops_from_space, einops_to_space,
+            #                                                  return_attn=return_attn, n=space_f))
+            #x = space_attn_output
+            time_output, time_attn_scores = self.timeattn(x, einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)
+
+            time_residual = x + time_output
+            time_residual_norm = self.norm1(time_residual)
+            space_output, space_attn_scores = self.attn(time_residual_norm, einops_from_space, einops_to_space, return_attn=return_attn,
+                                     f=space_f)
+
+            space_residual = time_output + self.drop_path(space_output)
+            #space_attn_output = time_output + self.drop_path(self.attn(time_residual_norm,
+            #                              einops_from_space, einops_to_space, return_attn=return_attn, f=space_f))
+            #x = x + self.drop_path(
+            #            self.attn(
+            #                self.norm1(x + self.timeattn(x, einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)),
+            #        einops_from_space, einops_to_space, return_attn=return_attn, f=space_f)
+            #        )
         else:
-            x = x + self.drop_path(self.attn(
-                self.nor1(x), einops_from_space, einops_to_space, f=space_f)
-            )
+            space_output = self.attn(self.norm1(x), einops_from_space, einops_to_space, return_attn=return_attn, f=space_f)
+            space_residual = x + self.drop_path(space_output)
+            #x = x + self.drop_path(self.attn(
+            #    self.norm1(x), einops_from_space, einops_to_space, f=space_f)
+            #)
+        x = space_residual
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
@@ -337,7 +365,6 @@ class PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = num_patches
-
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
@@ -687,8 +714,8 @@ class Timesformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x):
-        curr_frames = x.shape[1]
+    def forward_features(self, x, use_time_attn=True, return_attn=False):
+        b, curr_frames, channels, height, width = x.shape
         x = self.patch_embed(x)
         BF = x.shape[0]
         cls_tokens = self.cls_token.expand(BF, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
@@ -706,19 +733,19 @@ class Timesformer(nn.Module):
         curr_patches = x.shape[1]
         x = x + total_pos_embed[:, :curr_patches]
         x = self.pos_drop(x)
-
-        n = curr_patches - 1
+        #n = curr_patches - 1
+        n = (height // self.patch_embed.patch_size[0]) * (width // self.patch_embed.patch_size[1])
         f = curr_frames
         for blk in self.blocks:
             x = blk(x, self.einops_from_space, self.einops_to_space, self.einops_from_time, self.einops_to_time,
-                    time_n=n, space_f=f)
+                    time_n=n, space_f=f, use_time_attn=use_time_attn, return_attn=return_attn)
         pre_cls = x
         x = self.norm(x)[:, 0]
         x = self.pre_logits(x)
         return x
 
-    def forward(self, x):
-        x = self.forward_features(x)
+    def forward(self, x, use_time_attn=True, return_attn=False):
+        x = self.forward_features(x, use_time_attn=use_time_attn, return_attn=return_attn)
         x = self.head(x)
         return x
 
@@ -1114,10 +1141,15 @@ if __name__ == "__main__":
 
     model.load_state_dict(vit_checkpoint, strict=False)
     vit_model = vit_model
-    imgs = torch.rand([1, 2, 3, 224, 224])
+    imgs = torch.rand([4, 3, 3, 224, 224])
     print('TIMESFORMER OUTPUT:')
-    output = model(imgs)
+    output = model(imgs, return_attn=True)
     print(output.shape)
+
+    imgs_1_frame = torch.rand([4, 1, 3, 224, 224])
+    output2 = model(imgs_1_frame, return_attn=False)
+    print(output.shape)
+    print(output.min(), output.max())
     vit_model.head = nn.Identity()
 
     block_input = torch.ones([1, 197, 768])
@@ -1127,4 +1159,5 @@ if __name__ == "__main__":
         sub_img = imgs[:, idx]
         vit_output = vit_model(sub_img)
         print(output.shape)
+        print(output.min(), output.max())
         break
