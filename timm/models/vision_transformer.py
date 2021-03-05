@@ -252,7 +252,6 @@ class VarAttention(nn.Module):
         ret_attn = None
         if return_attn:
             out, out_attn_scores = out # two things were returned
-            import pdb; pdb.set_trace()
             out_attn_scores = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
         # merge back time or space
         out = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
@@ -265,7 +264,6 @@ class VarAttention(nn.Module):
         ## to out
         x = self.proj(out)
         x = self.proj_drop(x)
-        import pdb; pdb.set_trace()
         return x, ret_attn
 
 
@@ -1135,7 +1133,7 @@ if __name__ == "__main__":
     vit_checkpoint = vit_model.state_dict()
 
     # remove cls agg
-    model = timesformer_base_patch16_224(num_frames=3)
+    model = timesformer_base_patch16_224(num_frames=3, time_init='zeros')
     model.head = nn.Identity()
     model.pre_logits = nn.Identity()
 
