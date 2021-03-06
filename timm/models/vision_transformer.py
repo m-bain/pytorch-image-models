@@ -206,7 +206,7 @@ class VarAttention(nn.Module):
         if initialize == 'zeros':
             self.qkv.weight.data.fill_(0)
             self.qkv.bias.data.fill_(0)
-            self.proj.weight.data.fill_(0)
+            self.proj.weight.data.fill_(1)
             self.proj.bias.data.fill_(0)
         self.attn_drop = nn.Dropout(attn_drop)
         ### to out
@@ -234,6 +234,7 @@ class VarAttention(nn.Module):
 
         # let classification token attend to key / values of all patches across time and space
         cls_out = attn(cls_q, k, v, return_attn=return_attn)
+        cls_attn_scores = None
         if return_attn:
             cls_out, cls_attn_scores = cls_out # two things were returned
         # rearrange across time or space
@@ -249,10 +250,10 @@ class VarAttention(nn.Module):
         # attention
         out = attn(q_, k_, v_, return_attn=return_attn)
 
-        ret_attn = None
+        out_attn_scores = None
         if return_attn:
             out, out_attn_scores = out # two things were returned
-            out_attn_scores = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
+            #out_attn_scores = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
         # merge back time or space
         out = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
 
@@ -264,7 +265,7 @@ class VarAttention(nn.Module):
         ## to out
         x = self.proj(out)
         x = self.proj_drop(x)
-        return x, ret_attn
+        return x, out_attn_scores
 
 
 class Block(nn.Module):
@@ -326,29 +327,29 @@ class TimesBlock(nn.Module):
             #                                                  return_attn=return_attn, n=space_f))
             #x = space_attn_output
             time_output, time_attn_scores = self.timeattn(x, einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)
-
             time_residual = x + time_output
             time_residual_norm = self.norm1(time_residual)
             space_output, space_attn_scores = self.attn(time_residual_norm, einops_from_space, einops_to_space, return_attn=return_attn,
                                      f=space_f)
 
-            space_residual = time_output + self.drop_path(space_output)
-            #space_attn_output = time_output + self.drop_path(self.attn(time_residual_norm,
-            #                              einops_from_space, einops_to_space, return_attn=return_attn, f=space_f))
-            #x = x + self.drop_path(
+            space_residual = x + self.drop_path(space_output)
+
+            # x = x + self.drop_path(
             #            self.attn(
             #                self.norm1(x + self.timeattn(x, einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)),
             #        einops_from_space, einops_to_space, return_attn=return_attn, f=space_f)
             #        )
+            # space_residual = x
         else:
-            space_output = self.attn(self.norm1(x), einops_from_space, einops_to_space, return_attn=return_attn, f=space_f)
+            time_attn_scores = None
+            space_output, space_attn_scores = self.attn(self.norm1(x), einops_from_space, einops_to_space, return_attn=return_attn, f=space_f)
             space_residual = x + self.drop_path(space_output)
             #x = x + self.drop_path(self.attn(
             #    self.norm1(x), einops_from_space, einops_to_space, f=space_f)
             #)
         x = space_residual
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+        return x, (time_attn_scores, space_attn_scores)
 
 
 class PatchEmbed(nn.Module):
@@ -452,7 +453,6 @@ class VisionTransformer(nn.Module):
     A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`  -
         https://arxiv.org/abs/2010.11929
     """
-
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None):
@@ -607,8 +607,14 @@ class DistilledVisionTransformer(VisionTransformer):
 class Timesformer(nn.Module):
     """ Vision Transformer
 
-    A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`  -
-        https://arxiv.org/abs/2010.11929
+    A PyTorch impl of : `Timesformer`  - by Max Bain.
+        https://arxiv.org/abs/2102.05095
+
+    Based off ViT implementation and
+    lucidrains timesformer implementation [https://github.com/lucidrains/TimeSformer-pytorch].
+
+    Notable differences: allows for input frames to be less than maximum
+                        can return spatiotemporal attention weights from the forward pass via the `return_attn` flag
     """
 
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
@@ -633,6 +639,9 @@ class Timesformer(nn.Module):
             drop_path_rate (float): stochastic depth rate
             hybrid_backbone (nn.Module): CNN backbone to use in-place of PatchEmbed module
             norm_layer: (nn.Module): normalization layer
+            num_frames: maximum number of frames expected as input
+            time_init: how to initialise the time attention layer, 'zeros' allows for the timesformer to start off
+                        as ViT.
         """
         super().__init__()
         self.num_classes = num_classes
@@ -731,21 +740,37 @@ class Timesformer(nn.Module):
         curr_patches = x.shape[1]
         x = x + total_pos_embed[:, :curr_patches]
         x = self.pos_drop(x)
-        #n = curr_patches - 1
         n = (height // self.patch_embed.patch_size[0]) * (width // self.patch_embed.patch_size[1])
         f = curr_frames
+
+        temporal_attns = []
+        spatial_attns = []
         for blk in self.blocks:
-            x = blk(x, self.einops_from_space, self.einops_to_space, self.einops_from_time, self.einops_to_time,
+            x, spatio_attn = blk(x, self.einops_from_space, self.einops_to_space, self.einops_from_time, self.einops_to_time,
                     time_n=n, space_f=f, use_time_attn=use_time_attn, return_attn=return_attn)
+            temporal_attns.append(spatio_attn[0])
+            spatial_attns.append(spatio_attn[1])
+
+
         pre_cls = x
         x = self.norm(x)[:, 0]
         x = self.pre_logits(x)
+
+        if return_attn:
+            temporal_attns = torch.stack(temporal_attns)
+            spatial_attns = torch.stack(spatial_attns)
+            return x, (temporal_attns, spatial_attns)
         return x
 
     def forward(self, x, use_time_attn=True, return_attn=False):
-        x = self.forward_features(x, use_time_attn=use_time_attn, return_attn=return_attn)
-        x = self.head(x)
-        return x
+        if not return_attn:
+            x = self.forward_features(x, use_time_attn=use_time_attn, return_attn=return_attn)
+            x = self.head(x)
+            return x
+        else:
+            x, attn_scores = self.forward_features(x, use_time_attn=use_time_attn, return_attn=return_attn)
+            x = self.head(x)
+            return x, attn_scores
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from
@@ -1141,11 +1166,10 @@ if __name__ == "__main__":
     vit_model = vit_model
     imgs = torch.rand([4, 3, 3, 224, 224])
     print('TIMESFORMER OUTPUT:')
-    output = model(imgs, return_attn=True)
+    output, attn_scores = model(imgs, return_attn=True)
     print(output.shape)
-
-    imgs_1_frame = torch.rand([4, 1, 3, 224, 224])
-    output2 = model(imgs_1_frame, return_attn=False)
+    imgs_1_frame = torch.rand([4, 3, 3, 224, 224])
+    output2, attn2 = model(imgs_1_frame, return_attn=True)
     print(output.shape)
     print(output.min(), output.max())
     vit_model.head = nn.Identity()
