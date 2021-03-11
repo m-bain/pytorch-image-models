@@ -181,7 +181,7 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
@@ -236,16 +236,16 @@ class VarAttention(nn.Module):
         # let classification token attend to key / values of all patches across time and space
 
         # TODO: Remove
-        #if einops_to == '(b n) f d':
+        # if einops_to == '(b n) f d':
         #    return_attn = True
 
         cls_out = attn(cls_q, k, v, return_attn=return_attn)
         cls_attn_scores = None
         if return_attn:
-            cls_out, cls_attn_scores = cls_out # two things were returned
+            cls_out, cls_attn_scores = cls_out  # two things were returned
         # rearrange across time or space
         # TODO: REMOVE
-        #if einops_to == '(b n) f d':
+        # if einops_to == '(b n) f d':
         #    import pdb; pdb.set_trace()
         q_, k_, v_ = map(lambda t: rearrange(t, f'{einops_from} -> {einops_to}', **einops_dims), (q_, k_, v_))
 
@@ -261,9 +261,9 @@ class VarAttention(nn.Module):
 
         out_attn_scores = None
         if return_attn:
-            out, out_attn_scores = out # two things were returned
+            out, out_attn_scores = out  # two things were returned
             out_attn_scores = rearrange(out_attn_scores, '(b h) n d -> b h n d', h=h)
-        #out_attn_scores = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
+        # out_attn_scores = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
         # merge back time or space
         out = rearrange(out, f'{einops_to} -> {einops_from}', **einops_dims)
 
@@ -335,17 +335,19 @@ class TimesBlock(nn.Module):
             # space_attn_output = self.drop_path(
             #     self.attn(time_attn_output_norm, einops_from_space, einops_to_space,
             #                                                  return_attn=return_attn, n=space_f))
-            #x = space_attn_output
+            # x = space_attn_output
 
-            time_output, time_attn_scores = self.timeattn(self.norm3(x), einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)
+            time_output, time_attn_scores = self.timeattn(self.norm3(x), einops_from_time, einops_to_time,
+                                                          return_attn=return_attn, n=time_n)
             time_residual = x + time_output
-            #time_residual_norm = self.norm1(time_residual)
+            # time_residual_norm = self.norm1(time_residual)
             time_residual_norm = time_residual
-            space_output, space_attn_scores = self.attn(self.norm1(time_residual_norm), einops_from_space, einops_to_space, return_attn=return_attn,
-                                     f=space_f)
+            space_output, space_attn_scores = self.attn(self.norm1(time_residual_norm), einops_from_space,
+                                                        einops_to_space, return_attn=return_attn,
+                                                        f=space_f)
 
             space_residual = time_residual + self.drop_path(space_output)
-            #space_residual = x + self.drop_path(space_output)
+            # space_residual = x + self.drop_path(space_output)
 
             # x = x + self.drop_path(
             #            self.attn(
@@ -355,11 +357,12 @@ class TimesBlock(nn.Module):
             # space_residual = x
         else:
             time_attn_scores = None
-            space_output, space_attn_scores = self.attn(self.norm1(x), einops_from_space, einops_to_space, return_attn=return_attn, f=space_f)
+            space_output, space_attn_scores = self.attn(self.norm1(x), einops_from_space, einops_to_space,
+                                                        return_attn=return_attn, f=space_f)
             space_residual = x + self.drop_path(space_output)
-            #x = x + self.drop_path(self.attn(
+            # x = x + self.drop_path(self.attn(
             #    self.norm1(x), einops_from_space, einops_to_space, f=space_f)
-            #)
+            # )
         x = space_residual
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x, (time_attn_scores, space_attn_scores)
@@ -407,14 +410,13 @@ class VideoPatchEmbed(nn.Module):
 
     def forward(self, x):
         B, F, C, H, W = x.shape
-        assert H == self.img_size[0] and W == self.img_size[1], \
-            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        # assert H == self.img_size[0] and W == self.img_size[1], \
+        #    f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         assert F <= self.num_frames
         # why cant it be changed?
         new_input = x.view(-1, C, H, W)
         new_output = self.proj(new_input)
-        new_output = new_output.flatten(2).transpose(2, 1)
-        new_output = new_output.reshape(B, -1, self.embed_dim)
+
         return new_output
 
 
@@ -466,6 +468,7 @@ class VisionTransformer(nn.Module):
     A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`  -
         https://arxiv.org/abs/2010.11929
     """
+
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None):
@@ -633,7 +636,7 @@ class Timesformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
-                 num_frames=8, time_init='rand'):
+                 num_frames=8, time_init='rand', border_size=None, num_borders=0):
         """
         Args:
             img_size (int, tuple): input image size
@@ -664,17 +667,28 @@ class Timesformer(nn.Module):
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
 
         if hybrid_backbone is not None:
-            self.patch_embed = HybridEmbed(
-                hybrid_backbone, img_size=img_size, in_chans=in_chans, embed_dim=embed_dim)
+            # self.patch_embed = HybridEmbed(
+            #     hybrid_backbone, img_size=img_size, in_chans=in_chans, embed_dim=embed_dim)
+            raise NotImplementedError('hybrid backbone not implemented yet for timesformer')
         else:
             self.patch_embed = VideoPatchEmbed(
                 img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, num_frames=num_frames)
         num_patches = self.patch_embed.num_patches
         self.patches_per_frame = num_patches // num_frames
+        if border_size is not None:
+            if isinstance(patch_size, int):
+                patch_sizes = [patch_size, patch_size]
+            else:
+                patch_sizes = patch_size
+            num_border_patches = (border_size[1] // patch_sizes[1]) * (border_size[0] // patch_sizes[0]) * num_borders
+            self.patches_per_frame += num_border_patches
+        if num_borders not in [0, 2]:
+            raise NotImplementedError
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(
-            torch.zeros(1, self.patches_per_frame + 1, embed_dim))  # remember to take pos_embed[1:] for tiling over time
+            torch.zeros(1, self.patches_per_frame + 1,
+                        embed_dim))  # remember to take pos_embed[1:] for tiling over time
         self.temporal_embed = nn.Parameter(torch.zeros(1, num_frames, embed_dim))
 
         self.pos_drop = nn.Dropout(p=drop_rate)
@@ -705,7 +719,7 @@ class Timesformer(nn.Module):
 
         # TODO: comment this out so we don't overwrite the 0-initialisation. If training from scratch...
         # i.e. without ViT, then we might want this back
-        #self.apply(self._init_weights)
+        # self.apply(self._init_weights)
 
         ## einops transformations
         self.einops_from_space = 'b (f n) d'
@@ -713,6 +727,8 @@ class Timesformer(nn.Module):
         self.einops_from_time = 'b (f n) d'
         self.einops_to_time = '(b n) f d'
 
+        self.num_borders = num_borders
+        self.border_size = border_size
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -735,8 +751,24 @@ class Timesformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x, use_time_attn=True, return_attn=False):
-        b, curr_frames, channels, height, width = x.shape
-        x = self.patch_embed(x)
+        if self.num_borders is not None:
+            b, curr_frames, channels, _, _ = x[-1].shape
+            x_center = self.patch_embed(x[-1])
+            x_center = x_center.flatten(2).transpose(2, 1)
+            #x_center = x_center.reshape(b, -1, self.patch_embed.embed_dim)
+            borders = [self.patch_embed(brd) for brd in x[:-1]]
+            borders = torch.cat(borders, dim=2)
+            borders = borders.flatten(2).transpose(2, 1)
+            #borders = borders.reshape(b, -1, self.patch_embed.embed_dim)
+            x = torch.cat([x_center, borders], dim=1)
+            x = x.reshape(b, -1, self.patch_embed.embed_dim)
+
+        else:
+            b, curr_frames, channels, _, _ = x.shape
+            x = self.patch_embed(x)
+            x = x.flatten(2).transpose(2, 1)
+            x = x.reshape(b, -1, self.patch_embed.embed_dim)
+
         BF = x.shape[0]
         cls_tokens = self.cls_token.expand(BF, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
@@ -744,32 +776,33 @@ class Timesformer(nn.Module):
         cls_embed = self.pos_embed[:, 0, :].unsqueeze(1)
         tile_pos_embed = self.pos_embed[:, 1:, :].repeat(1, self.num_frames, 1)
         # temporal embed needs to be repeated within each frame (this does [1,2,3] --> [1,1,1,2,2,2,3,3,3]...)
-        tile_temporal_embed = self.temporal_embed.repeat_interleave(
-            self.patch_embed.num_patches // self.num_frames, 1)
-
+        # TODO check this is equivalent for non margin
+        tile_temporal_embed = self.temporal_embed.repeat_interleave(self.patches_per_frame, 1)
+        #tile_temporal_embed = self.temporal_embed.repeat_interleave(
+        #    self.patch_embed.num_patches // self.num_frames, 1)
         total_pos_embed = tile_pos_embed + tile_temporal_embed
         total_pos_embed = torch.cat([cls_embed, total_pos_embed], dim=1)
 
         curr_patches = x.shape[1]
         x = x + total_pos_embed[:, :curr_patches]
         x = self.pos_drop(x)
-        n = (height // self.patch_embed.patch_size[0]) * (width // self.patch_embed.patch_size[1])
+        n = self.patches_per_frame
         f = curr_frames
 
         temporal_attns = []
         spatial_attns = []
         for blk in self.blocks:
-            x, spatio_attn = blk(x, self.einops_from_space, self.einops_to_space, self.einops_from_time, self.einops_to_time,
-                    time_n=n, space_f=f, use_time_attn=use_time_attn, return_attn=return_attn)
+            x, spatio_attn = blk(x, self.einops_from_space, self.einops_to_space, self.einops_from_time,
+                                 self.einops_to_time,
+                                 time_n=n, space_f=f, use_time_attn=use_time_attn, return_attn=return_attn)
             temporal_attns.append(spatio_attn[0])
             spatial_attns.append(spatio_attn[1])
-
 
         pre_cls = x
         x = self.norm(x)[:, 0]
         x = self.pre_logits(x)
 
-        #print(torch.stack(temporal_attns).max(), torch.stack(temporal_attns).std())
+        # print(torch.stack(temporal_attns).max(), torch.stack(temporal_attns).std())
 
         if return_attn:
             temporal_attns = torch.stack(temporal_attns)
@@ -786,6 +819,7 @@ class Timesformer(nn.Module):
             x, attn_scores = self.forward_features(x, use_time_attn=use_time_attn, return_attn=return_attn)
             x = self.head(x)
             return x, attn_scores
+
 
 def resize_pos_embed(posemb, posemb_new):
     # Rescale the grid of position embeddings when loading from state_dict. Adapted from
@@ -1166,6 +1200,7 @@ def timesformer_base_patch16_224(pretrained=False, **kwargs):
                                        timesformer=True, **model_kwargs)
     return model
 
+
 def timesformer_base_patch32_384(pretrained=False, **kwargs):
     """Timesformer: ViT-Base (ViT-B/16) from original paper (https://arxiv.org/abs/2010.11929).
     ImageNet-1k weights fine-tuned from in21k @ 224x224, source https://github.com/google-research/vision_transformer.
@@ -1175,23 +1210,37 @@ def timesformer_base_patch32_384(pretrained=False, **kwargs):
                                        timesformer=True, **model_kwargs)
     return model
 
-if __name__ == "__main__":
-    from torch import nn
-    vit_model = vit_base_patch32_384(pretrained=True)
+
+def timesformer_base_patch16_384(pretrained=False, **kwargs):
+    """Timesformer: ViT-Base (ViT-B/16) from original paper (https://arxiv.org/abs/2010.11929).
+    ImageNet-1k weights fine-tuned from in21k @ 224x224, source https://github.com/google-research/vision_transformer.
+    """
+    model_kwargs = dict(patch_size=16, embed_dim=768, depth=12, num_heads=12, **kwargs)
+    model = _create_vision_transformer('vit_base_patch16_384', pretrained=pretrained,
+                                       timesformer=True, **model_kwargs)
+    return model
+
+
+from torch import nn
+from timm.utils import custom_transform
+
+
+def compare_vit_vs_timesformer():
+    vit_model = vit_base_patch16_224(pretrained=True)
     vit_checkpoint = vit_model.state_dict()
 
     # remove cls agg
-    model = timesformer_base_patch32_384(num_frames=4, time_init='zeros')
+    model = timesformer_base_patch16_224(num_frames=4, time_init='zeros')
     model.head = nn.Identity()
     model.pre_logits = nn.Identity()
 
     model.load_state_dict(vit_checkpoint, strict=False)
     vit_model = vit_model
-    imgs = torch.rand([1, 4, 3, 384, 384])
+    imgs = torch.rand([1, 4, 3, 224, 224])
     print('TIMESFORMER OUTPUT:')
     output, (time_attn, space_attn) = model(imgs, return_attn=True)
     print(output.shape)
-    imgs_1_frame = torch.rand([4, 3, 3, 384, 384])
+    imgs_1_frame = torch.rand([4, 3, 3, 224, 224])
     output2, attn2 = model(imgs_1_frame, return_attn=True)
     print(output.shape)
     print(output.min(), output.max())
@@ -1206,3 +1255,28 @@ if __name__ == "__main__":
         print(output.shape)
         print(output.min(), output.max())
         break
+
+
+def check_border_input():
+    vit_model = vit_base_patch16_224(pretrained=True)
+    vit_model.head = nn.Identity()
+    vit_checkpoint = vit_model.state_dict()
+
+    bigger_input = torch.rand([1, 4, 3, 448, 448])
+    # remove cls agg
+    model = timesformer_base_patch16_224(num_frames=4, time_init='zeros', border_size=(224, 64), num_borders=2)
+    model.head = nn.Identity()
+    model.pre_logits = nn.Identity()
+    load_pos_embed = vit_checkpoint['pos_embed']
+    curr_pos_embed = model.state_dict()['pos_embed']
+    new_pos_embed = torch.zeros_like(curr_pos_embed)
+    new_pos_embed[:, :load_pos_embed.shape[1]] = load_pos_embed
+    vit_checkpoint['pos_embed'] = new_pos_embed
+    model.load_state_dict(vit_checkpoint, strict=False)
+    imgs_with_borders = custom_transform.center_plus_twohori_crops(bigger_input, [224, 224], 64)
+    res = model(imgs_with_borders)
+
+
+if __name__ == "__main__":
+    #compare_vit_vs_timesformer()
+    check_border_input()
