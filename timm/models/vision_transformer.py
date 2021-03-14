@@ -751,7 +751,7 @@ class Timesformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x, use_time_attn=True, return_attn=False):
-        if self.num_borders is not None:
+        if self.num_borders != 0:
             b, curr_frames, channels, _, _ = x[-1].shape
             x_center = self.patch_embed(x[-1])
             x_center = x_center.flatten(2).transpose(2, 1)
@@ -1264,7 +1264,7 @@ def check_border_input():
 
     bigger_input = torch.rand([1, 4, 3, 448, 448])
     # remove cls agg
-    model = timesformer_base_patch16_224(num_frames=4, time_init='zeros', border_size=(224, 64), num_borders=2)
+    model = timesformer_base_patch16_224(num_frames=4, time_init='zeros', border_size=(224, 64), num_borders=4)
     model.head = nn.Identity()
     model.pre_logits = nn.Identity()
     load_pos_embed = vit_checkpoint['pos_embed']
@@ -1273,7 +1273,7 @@ def check_border_input():
     new_pos_embed[:, :load_pos_embed.shape[1]] = load_pos_embed
     vit_checkpoint['pos_embed'] = new_pos_embed
     model.load_state_dict(vit_checkpoint, strict=False)
-    imgs_with_borders = custom_transform.center_plus_twohori_crops(bigger_input, [224, 224], 64)
+    imgs_with_borders = custom_transform.center_plus_four_crops(bigger_input, [224, 224], )
     res = model(imgs_with_borders)
 
 
