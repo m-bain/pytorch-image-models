@@ -301,7 +301,8 @@ class Block(nn.Module):
 class TimesBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, time_init='zeros'):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, time_init='zeros',
+                 attention_style='ddst'):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = VarAttention(
@@ -318,6 +319,8 @@ class TimesBlock(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
         self.norm3 = norm_layer(dim)
 
+        self.attention_style = attention_style
+
     def forward(self, x, einops_from_space, einops_to_space, einops_from_time, einops_to_time,
                 time_n, space_f, use_time_attn=True, return_attn=False):
 
@@ -329,43 +332,50 @@ class TimesBlock(nn.Module):
         # x''' = space_attn(x'')
         # then norm, mlp, residual with dropout
         # x'''' = x''' + drop(mlp(norm2(x''')))
-        if use_time_attn:
-            # time_attn_output = x + self.timeattn(x, einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)
-            # time_attn_output_norm = self.norm1(time_attn_output)
-            # space_attn_output = self.drop_path(
-            #     self.attn(time_attn_output_norm, einops_from_space, einops_to_space,
-            #                                                  return_attn=return_attn, n=space_f))
-            # x = space_attn_output
+        if self.attention_style == 'ddst':
+            if use_time_attn:
 
-            time_output, time_attn_scores = self.timeattn(self.norm3(x), einops_from_time, einops_to_time,
-                                                          return_attn=return_attn, n=time_n)
-            time_residual = x + time_output
-            # time_residual_norm = self.norm1(time_residual)
-            time_residual_norm = time_residual
-            space_output, space_attn_scores = self.attn(self.norm1(time_residual_norm), einops_from_space,
-                                                        einops_to_space, return_attn=return_attn,
-                                                        f=space_f)
+                time_output, time_attn_scores = self.timeattn(self.norm3(x), einops_from_time, einops_to_time,
+                                                              return_attn=return_attn, n=time_n)
+                time_residual = x + time_output
+                # time_residual_norm = self.norm1(time_residual)
+                time_residual_norm = time_residual
+                space_output, space_attn_scores = self.attn(self.norm1(time_residual_norm), einops_from_space,
+                                                            einops_to_space, return_attn=return_attn,
+                                                            f=space_f)
 
-            space_residual = time_residual + self.drop_path(space_output)
-            # space_residual = x + self.drop_path(space_output)
+                space_residual = time_residual + self.drop_path(space_output)
 
-            # x = x + self.drop_path(
-            #            self.attn(
-            #                self.norm1(x + self.timeattn(x, einops_from_time, einops_to_time, return_attn=return_attn, n=time_n)),
-            #        einops_from_space, einops_to_space, return_attn=return_attn, f=space_f)
-            #        )
-            # space_residual = x
+            else:
+                time_attn_scores = None
+                space_output, space_attn_scores = self.attn(self.norm1(x), einops_from_space, einops_to_space,
+                                                            return_attn=return_attn, f=space_f)
+                space_residual = x + self.drop_path(space_output)
+
+            x = space_residual
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x, (time_attn_scores, space_attn_scores)
         else:
-            time_attn_scores = None
-            space_output, space_attn_scores = self.attn(self.norm1(x), einops_from_space, einops_to_space,
-                                                        return_attn=return_attn, f=space_f)
-            space_residual = x + self.drop_path(space_output)
-            # x = x + self.drop_path(self.attn(
-            #    self.norm1(x), einops_from_space, einops_to_space, f=space_f)
-            # )
-        x = space_residual
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x, (time_attn_scores, space_attn_scores)
+            if use_time_attn:
+                time_output, time_attn_scores = self.timeattn(self.norm3(x), einops_from_time, einops_to_time,
+                                                              return_attn=return_attn, n=time_n)
+                time_residual = x + time_output
+                # time_residual_norm = self.norm1(time_residual)
+                time_residual_norm = time_residual
+                space_output, space_attn_scores = self.attn(self.norm1(time_residual_norm), einops_from_space,
+                                                            einops_to_space, return_attn=return_attn,
+                                                            f=space_f)
+
+                space_residual = x + self.drop_path(space_output)
+            else:
+                raise NotImplementedError
+
+
+            x = space_residual
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x, (time_attn_scores, space_attn_scores)
+
+
 
 
 class PatchEmbed(nn.Module):
@@ -636,7 +646,7 @@ class Timesformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., hybrid_backbone=None, norm_layer=None,
-                 num_frames=8, time_init='rand', border_size=None, num_borders=0):
+                 num_frames=8, time_init='rand', border_size=None, num_borders=0, attention_style='ddst'):
         """
         Args:
             img_size (int, tuple): input image size
@@ -665,7 +675,7 @@ class Timesformer(nn.Module):
         self.num_frames = num_frames
         self.embed_dim = embed_dim
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
-
+        print("######USING ATTENTION STYLE: ", attention_style)
         if hybrid_backbone is not None:
             # self.patch_embed = HybridEmbed(
             #     hybrid_backbone, img_size=img_size, in_chans=in_chans, embed_dim=embed_dim)
@@ -697,7 +707,8 @@ class Timesformer(nn.Module):
         self.blocks = nn.ModuleList([
             TimesBlock(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, time_init=time_init)
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, time_init=time_init,
+            attention_style=attention_style)
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
 
@@ -1230,7 +1241,7 @@ def compare_vit_vs_timesformer():
     vit_checkpoint = vit_model.state_dict()
 
     # remove cls agg
-    model = timesformer_base_patch16_224(num_frames=4, time_init='zeros')
+    model = timesformer_base_patch16_224(num_frames=4, time_init='zeros', attention_style='og')
     model.head = nn.Identity()
     model.pre_logits = nn.Identity()
 
@@ -1278,5 +1289,5 @@ def check_border_input():
 
 
 if __name__ == "__main__":
-    #compare_vit_vs_timesformer()
-    check_border_input()
+    compare_vit_vs_timesformer()
+    #check_border_input()
